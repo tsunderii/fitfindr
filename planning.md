@@ -15,74 +15,109 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ### Tool 1: search_listings
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Filters the secondhand listings dataset (`load_listings()`) by a free-text style description, an optional size, and an optional maximum price, then scores each surviving listing for relevance to the description and returns the best matches sorted high-to-low.
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `description` (str): ...
-- `size` (str): ...
-- `max_price` (float): ...
+- `description` (str, required): the user's plain-language style query, e.g. `"vintage graphic tee"`. Matched against each listing's `title`, `description`, and `style_tags`.
+- `size` (str | None, optional): requested size, e.g. `"M"`. **Loose/optional filter** — a listing passes if its `size` string fuzzily contains the token (`"M"` matches `"M"`, `"S/M"`, `"M/L"`, `"M (oversized)"`) or is a one-size item; size is never a hard exclude when `None`.
+- `max_price` (float | None, optional): price ceiling in dollars. A listing passes only if `price <= max_price`. No filter when `None`.
 
 **What it returns:**
-<!-- Describe the return value — what fields does a result contain? -->
+A list of up to 3 listing dicts, sorted by descending relevance. Each dict carries the full listing fields (`id`, `title`, `description`, `category`, `style_tags`, `size`, `condition`, `price`, `colors`, `brand`, `platform`) plus an added `relevance` (float) score. Returns `[]` when nothing matches.
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if no listings match? -->
+On `[]`, the agent **stops the chain** — it does not call `suggest_outfit`. It reports back to the user which constraint to loosen (raise `max_price`, drop or change `size`, or broaden the style words), based on which filter eliminated the most candidates.
 
 ---
 
 ### Tool 2: suggest_outfit
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Takes the chosen listing and the user's wardrobe and produces a short, specific styling suggestion — which owned pieces to pair the new item with and how to wear it — by matching on `category` (fill the gaps the new item doesn't cover), `colors`, and `style_tags`.
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `new_item` (dict): ...
-- `wardrobe` (dict): ...
+- `new_item` (dict, required): a single listing dict, exactly as returned by `search_listings` (the top pick the user is considering).
+- `wardrobe` (dict, required): the user's closet in the wardrobe-schema shape — `{"items": [ {id, name, category, colors, style_tags, notes}, ... ]}`. May be the example wardrobe, a user-built one, or empty.
 
 **What it returns:**
-<!-- Describe the return value -->
+A dict `{ "suggestion": str, "referenced_item_ids": list[str] }` — a 1–3 sentence styling tip naming concrete wardrobe pieces, plus the `id`s of the wardrobe items it referenced (so `create_fit_card` and the UI can cite them).
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
+If `wardrobe["items"]` is empty, it does **not** invent owned pieces — it returns a general styling suggestion for the new item alone (`referenced_item_ids: []`) and the agent notes the wardrobe is empty. It never receives empty `new_item` because the chain only reaches it after a successful search.
 
 ---
 
 ### Tool 3: create_fit_card
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Turns the styling suggestion and the new item into a short, casual, social-media-ready caption (the kind you'd post under a thrift haul) — first-person, includes the price/platform hook, no hashtag spam.
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `outfit` (...): ...
+- `outfit` (dict, required): the `suggest_outfit` return value (`{suggestion, referenced_item_ids}`) — the styling tip the caption is built around.
+- `new_item` (dict, required): the listing dict, used for the concrete hook (`title`, `price`, `platform`).
 
 **What it returns:**
-<!-- Describe the return value -->
+A `str` — a single ready-to-post caption (≈1–2 short lines), e.g. `"scored this faded bootleg tee on depop for $24 🤍 instant 90s fit"`.
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if the outfit data is incomplete? -->
+If `outfit` or `new_item` is missing/incomplete (no `suggestion`, or no `title`/`price`), it does **not** fabricate a caption — it returns an error signal and the agent skips the fit card rather than posting a hollow one. In normal flow this never triggers, since the tool only runs after `suggest_outfit` succeeds.
 
 ---
 
 ### Additional Tools (if any)
 
-<!-- Copy the block above for any tools beyond the required three -->
+None for the core build — the three required tools cover search → style → caption. Possible stretch tool: `refine_search(previous_query, feedback)` to re-run `search_listings` with adjusted filters when the user rejects the first result.
 
 ---
 
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
-<!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
+
+The loop is a fixed-order chain gated by the result of the previous step — each tool runs only if its precondition (set by the prior tool's output) is met. It inspects the session state after every call and branches:
+
+```
+1. Parse the user message → { description, size, max_price }.
+   IF no usable description  → ask the user to clarify what they're looking for; STOP.
+
+2. Call search_listings(description, size, max_price).
+   IF results == []          → tell the user which filter to loosen (price/size/style); STOP.
+                               (do NOT call suggest_outfit)
+   ELSE                      → store results, pick top result (highest relevance) → state.selected_item.
+
+3. Call suggest_outfit(new_item=state.selected_item, wardrobe=state.wardrobe).
+   IF wardrobe is empty      → still proceed, but with general (non-owned-item) advice.
+   ELSE                      → store suggestion + referenced_item_ids → state.outfit.
+
+4. Call create_fit_card(outfit=state.outfit, new_item=state.selected_item).
+   IF outfit/new_item incomplete → skip the card, return search + styling only.
+   ELSE                          → store caption → state.fit_card.
+
+5. DONE → render selected_item + outfit + fit_card to the user.
+```
+
+**What changes its behavior:** whether `search_listings` returned anything (hard gate — empty stops the chain), whether the wardrobe has items (soft gate — changes the *style* of advice, not whether step 3 runs), and whether the outfit data is complete (gate on step 4). **Termination:** the loop is done after step 4, or early at any STOP. It is not open-ended — there is no re-planning unless the optional `refine_search` stretch tool is added.
 
 ---
 
 ## State Management
 
 **How does information from one tool get passed to the next?**
-<!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+
+A single per-session `state` dict is the shared memory the planning loop reads and writes between tool calls. Each tool writes its output into `state`; the next tool reads what it needs from `state` rather than re-deriving it:
+
+```python
+state = {
+    "query":          {"description": str, "size": str|None, "max_price": float|None},
+    "wardrobe":       dict,        # loaded once via get_example_wardrobe()/get_empty_wardrobe()
+    "search_results": list[dict],  # written by search_listings
+    "selected_item":  dict|None,   # top result the loop picked → input to suggest_outfit + create_fit_card
+    "outfit":         dict|None,   # {suggestion, referenced_item_ids} written by suggest_outfit
+    "fit_card":       str|None,    # caption written by create_fit_card
+}
+```
+
+**Flow:** `query` + `wardrobe` are set at session start → `search_listings` writes `search_results` and the loop sets `selected_item` → `suggest_outfit` reads `selected_item` + `wardrobe`, writes `outfit` → `create_fit_card` reads `outfit` + `selected_item`, writes `fit_card`. The `None` defaults double as guards: a tool's precondition is "the field it depends on is non-`None`," which is exactly what the planning loop checks before each step.
 
 ---
 
@@ -92,41 +127,56 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| search_listings | No results match the query | Stop the chain — do **not** call `suggest_outfit`. Tell the user which constraint to loosen (raise `max_price`, change/drop `size`, or broaden the style words), naming the filter that eliminated the most candidates. |
+| suggest_outfit | Wardrobe is empty | Proceed, but return general styling advice for the new item alone with `referenced_item_ids: []`; the agent notes the closet is empty and invites the user to add wardrobe items for personalized pairings. |
+| create_fit_card | Outfit input is missing or incomplete | Do not fabricate a caption. Skip the fit card and return the search result + styling suggestion only, so the user still gets a useful answer. |
 
 ---
 
 ## Architecture
 
-<!-- Draw a diagram of your agent showing how the components connect:
-     User input → Planning Loop → Tools (search_listings, suggest_outfit, create_fit_card)
-                                                                          ↕
-                                                                   State / Session
-     Show what triggers each tool, how state flows between them, and where error paths branch off.
-     ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
-     sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
-     the planning loop and each individual tool. -->
+```mermaid
+flowchart TD
+    U([User message]) --> P[Planning Loop]
+
+    P -->|"description, size, max_price"| S[search_listings]
+    S -->|"results == []"| E1[/"Tell user what to loosen<br/>STOP — no downstream calls"/]
+    S -->|"results found → state.selected_item"| O[suggest_outfit]
+
+    O -->|"wardrobe empty → general advice"| O
+    O -->|"state.outfit"| C[create_fit_card]
+    C -->|"outfit/item incomplete"| E2[/"Skip card,<br/>return search + styling"/]
+    C -->|"state.fit_card"| R([Render to user:<br/>listing + outfit + caption])
+
+    E1 --> R
+    E2 --> R
+
+    subgraph ST [Session State]
+      direction LR
+      Q[query] --- W[wardrobe] --- SR[search_results] --- SI[selected_item] --- OF[outfit] --- FC[fit_card]
+    end
+
+    S <-->|read query / write search_results| ST
+    O <-->|read selected_item + wardrobe / write outfit| ST
+    C <-->|read outfit + selected_item / write fit_card| ST
+    P <-->|reads state to pick next tool| ST
+```
+
+**Control flow:** top-to-bottom chain; each tool fires only when the prior step populated its required state field. **Data flow:** every tool reads its inputs from and writes its outputs to the shared `Session State` (right side), so nothing is recomputed. **Error branches:** an empty search exits immediately to the user (never reaching `suggest_outfit`); an incomplete outfit skips only the fit card.
 
 ---
 
 ## AI Tool Plan
 
-<!-- For each part of the implementation below, describe:
-     - Which AI tool you plan to use (Claude, Copilot, ChatGPT, etc.)
-     - What you'll give it as input (which sections of this planning.md, your agent diagram)
-     - What you expect it to produce
-     - How you'll verify the output matches your spec before moving on
-
-     "I'll use AI to help me code" is not a plan.
-     "I'll give Claude my Tool 1 spec (inputs, return value, failure mode) and ask it to implement
-     search_listings() using load_listings() from the data loader — then test it against 3 queries
-     before trusting it" is a plan. -->
-
 **Milestone 3 — Individual tool implementations:**
 
+- **`search_listings` — Claude (Claude Code).** Input: the **Tool 1** spec above (inputs, loose-size rule, return shape with `relevance`, empty-result behavior) plus the field list from `utils/data_loader.py`. Expect: a function using `load_listings()` that filters by price/size/description and ranks by keyword overlap against `title`/`description`/`style_tags`. Verify against 3 queries before trusting it — (a) `"vintage graphic tee", max_price=30` should surface `lst_006`/`lst_033`/`lst_002`; (b) a `max_price=5` query should return `[]`; (c) `size="M"` should still admit `"S/M"`/`"M/L"` listings (loose match).
+- **`suggest_outfit` — Claude.** Input: the **Tool 2** spec + the wardrobe schema. Expect: a function that returns `{suggestion, referenced_item_ids}` and degrades to general advice on an empty wardrobe. Verify: run with the example wardrobe (suggestion must name real `w_***` pieces and the ids must appear in the wardrobe) and with `get_empty_wardrobe()` (`referenced_item_ids == []`).
+- **`create_fit_card` — Claude.** Input: the **Tool 3** spec. Expect: a one/two-line caption string; error signal on incomplete input. Verify: feed a complete `outfit`+`new_item` (caption mentions price/platform) and a `{}` outfit (returns the error signal, not a fabricated caption).
+
 **Milestone 4 — Planning loop and state management:**
+
+- **Claude (Claude Code).** Input: the **Planning Loop** pseudocode, the **State Management** `state` dict, the **Architecture** Mermaid diagram, and the **Error Handling** table. Expect: a driver that builds `state`, calls the three tools in order, enforces each gate (empty search → STOP before `suggest_outfit`; empty wardrobe → still run; incomplete outfit → skip card), and renders the final listing + outfit + caption. Verify by replaying the **A Complete Interaction** walkthrough end-to-end (must reach a fit card) and the **Error path** query (`max_price` too low → stops after search, never calls `suggest_outfit`).
 
 ---
 
