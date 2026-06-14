@@ -40,10 +40,10 @@ Takes the chosen listing and the user's wardrobe and produces a short, specific 
 - `wardrobe` (dict, required): the user's closet in the wardrobe-schema shape — `{"items": [ {id, name, category, colors, style_tags, notes}, ... ]}`. May be the example wardrobe, a user-built one, or empty.
 
 **What it returns:**
-A dict `{ "suggestion": str, "referenced_item_ids": list[str] }` — a 1–3 sentence styling tip naming concrete wardrobe pieces, plus the `id`s of the wardrobe items it referenced (so `create_fit_card` and the UI can cite them).
+A non-empty `str` — a 2–4 sentence styling tip that names concrete wardrobe pieces and says how to wear the new item (tuck, layer, roll sleeves, etc.). The string is what `create_fit_card` and the UI consume directly.
 
 **What happens if it fails or returns nothing:**
-If `wardrobe["items"]` is empty, it does **not** invent owned pieces — it returns a general styling suggestion for the new item alone (`referenced_item_ids: []`) and the agent notes the wardrobe is empty. It never receives empty `new_item` because the chain only reaches it after a successful search.
+If `wardrobe["items"]` is empty, it does **not** invent owned pieces — it returns a general styling-advice string for the new item alone (what pairs well, what vibe it suits) and the agent notes the wardrobe is empty. It never receives empty `new_item` because the chain only reaches it after a successful search.
 
 ---
 
@@ -53,7 +53,7 @@ If `wardrobe["items"]` is empty, it does **not** invent owned pieces — it retu
 Turns the styling suggestion and the new item into a short, casual, social-media-ready caption (the kind you'd post under a thrift haul) — first-person, includes the price/platform hook, no hashtag spam.
 
 **Input parameters:**
-- `outfit` (dict, required): the `suggest_outfit` return value (`{suggestion, referenced_item_ids}`) — the styling tip the caption is built around.
+- `outfit` (str, required): the `suggest_outfit` return value — the styling-tip string the caption is built around.
 - `new_item` (dict, required): the listing dict, used for the concrete hook (`title`, `price`, `platform`).
 
 **What it returns:**
@@ -107,17 +107,19 @@ The loop is a fixed-order chain gated by the result of the previous step — eac
 A single per-session `state` dict is the shared memory the planning loop reads and writes between tool calls. Each tool writes its output into `state`; the next tool reads what it needs from `state` rather than re-deriving it:
 
 ```python
-state = {
-    "query":          {"description": str, "size": str|None, "max_price": float|None},
-    "wardrobe":       dict,        # loaded once via get_example_wardrobe()/get_empty_wardrobe()
-    "search_results": list[dict],  # written by search_listings
-    "selected_item":  dict|None,   # top result the loop picked → input to suggest_outfit + create_fit_card
-    "outfit":         dict|None,   # {suggestion, referenced_item_ids} written by suggest_outfit
-    "fit_card":       str|None,    # caption written by create_fit_card
+session = {                        # the dict built by _new_session() in agent.py
+    "query":              str,         # original user query
+    "parsed":             dict,        # {description, size, max_price} from _parse_query
+    "search_results":     list[dict],  # written by search_listings
+    "selected_item":      dict|None,   # top result the loop picked → input to both LLM tools
+    "wardrobe":           dict,        # set at session start (example or empty)
+    "outfit_suggestion":  str|None,    # string written by suggest_outfit
+    "fit_card":           str|None,    # caption string written by create_fit_card
+    "error":              str|None,    # set (and the loop returns early) if a step can't proceed
 }
 ```
 
-**Flow:** `query` + `wardrobe` are set at session start → `search_listings` writes `search_results` and the loop sets `selected_item` → `suggest_outfit` reads `selected_item` + `wardrobe`, writes `outfit` → `create_fit_card` reads `outfit` + `selected_item`, writes `fit_card`. The `None` defaults double as guards: a tool's precondition is "the field it depends on is non-`None`," which is exactly what the planning loop checks before each step.
+**Flow:** `query` + `wardrobe` are set at session start → `_parse_query` writes `parsed` → `search_listings` writes `search_results` and the loop sets `selected_item` → `suggest_outfit` reads `selected_item` + `wardrobe`, writes `outfit_suggestion` → `create_fit_card` reads `outfit_suggestion` + `selected_item`, writes `fit_card`. The `None` defaults double as guards: a tool's precondition is "the field it depends on is non-`None`." If `search_results` is empty the loop writes `error` and returns before the LLM tools run, so `selected_item`/`outfit_suggestion`/`fit_card` stay `None`.
 
 ---
 
@@ -144,7 +146,7 @@ flowchart TD
     S -->|"results found → state.selected_item"| O[suggest_outfit]
 
     O -->|"wardrobe empty → general advice"| O
-    O -->|"state.outfit"| C[create_fit_card]
+    O -->|"state.outfit_suggestion"| C[create_fit_card]
     C -->|"outfit/item incomplete"| E2[/"Skip card,<br/>return search + styling"/]
     C -->|"state.fit_card"| R([Render to user:<br/>listing + outfit + caption])
 
@@ -153,12 +155,12 @@ flowchart TD
 
     subgraph ST [Session State]
       direction LR
-      Q[query] --- W[wardrobe] --- SR[search_results] --- SI[selected_item] --- OF[outfit] --- FC[fit_card]
+      Q[query] --- PA[parsed] --- W[wardrobe] --- SR[search_results] --- SI[selected_item] --- OF[outfit_suggestion] --- FC[fit_card] --- ER[error]
     end
 
-    S <-->|read query / write search_results| ST
-    O <-->|read selected_item + wardrobe / write outfit| ST
-    C <-->|read outfit + selected_item / write fit_card| ST
+    S <-->|read parsed / write search_results| ST
+    O <-->|read selected_item + wardrobe / write outfit_suggestion| ST
+    C <-->|read outfit_suggestion + selected_item / write fit_card| ST
     P <-->|reads state to pick next tool| ST
 ```
 
@@ -171,7 +173,7 @@ flowchart TD
 **Milestone 3 — Individual tool implementations:**
 
 - **`search_listings` — Claude (Claude Code).** Input: the **Tool 1** spec above (inputs, loose-size rule, return shape with `relevance`, empty-result behavior) plus the field list from `utils/data_loader.py`. Expect: a function using `load_listings()` that filters by price/size/description and ranks by keyword overlap against `title`/`description`/`style_tags`. Verify against 3 queries before trusting it — (a) `"vintage graphic tee", max_price=30` should surface `lst_006`/`lst_033`/`lst_002`; (b) a `max_price=5` query should return `[]`; (c) `size="M"` should still admit `"S/M"`/`"M/L"` listings (loose match).
-- **`suggest_outfit` — Claude.** Input: the **Tool 2** spec + the wardrobe schema. Expect: a function that returns `{suggestion, referenced_item_ids}` and degrades to general advice on an empty wardrobe. Verify: run with the example wardrobe (suggestion must name real `w_***` pieces and the ids must appear in the wardrobe) and with `get_empty_wardrobe()` (`referenced_item_ids == []`).
+- **`suggest_outfit` — Claude.** Input: the **Tool 2** spec + the wardrobe schema. Expect: a function that returns a styling-tip **string** and degrades to general advice on an empty wardrobe. Verify: run with the example wardrobe (suggestion must name real wardrobe pieces) and with `get_empty_wardrobe()` (still returns a non-empty general-advice string, no crash).
 - **`create_fit_card` — Claude.** Input: the **Tool 3** spec. Expect: a one/two-line caption string; error signal on incomplete input. Verify: feed a complete `outfit`+`new_item` (caption mentions price/platform) and a `{}` outfit (returns the error signal, not a fabricated caption).
 
 **Milestone 4 — Planning loop and state management:**
