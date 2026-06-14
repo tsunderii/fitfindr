@@ -66,7 +66,15 @@ If `outfit` or `new_item` is missing/incomplete (no `suggestion`, or no `title`/
 
 ### Additional Tools (if any)
 
-None for the core build — the three required tools cover search → style → caption. Possible stretch tool: `refine_search(previous_query, feedback)` to re-run `search_listings` with adjusted filters when the user rejects the first result.
+The three required tools cover search → style → caption. Two stretch features were added:
+
+- **`compare_price(item, listings=None)`** → `dict`. Assesses whether the selected item's
+  price is a deal by comparing it to the median price of same-category listings in the
+  dataset; returns a verdict (`great deal` / `fair price` / `overpriced` / `no comparison`)
+  plus reasoning. Called by the loop right after selecting the top result.
+- **Retry with fallback** (`_search_with_fallback` in `agent.py`). When `search_listings`
+  returns `[]`, the loop retries with looser constraints (drop size → drop price → drop both)
+  and reports which filters it relaxed, instead of stopping on the first miss.
 
 ---
 

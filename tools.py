@@ -10,10 +10,12 @@ Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
     create_fit_card(outfit, new_item)               → str
+    compare_price(item, listings=None)              → dict   (stretch)
 """
 
 import os
 import re
+import statistics
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -280,3 +282,89 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     )
     # 3. Higher temperature so captions vary across runs/inputs.
     return _chat(prompt, temperature=0.9, max_tokens=160)
+
+
+# ── Stretch tool: compare_price ───────────────────────────────────────────────
+
+def compare_price(item: dict, listings: list[dict] | None = None) -> dict:
+    """
+    Assess whether `item`'s price is a good deal by comparing it to the prices of
+    comparable listings — other items in the *same category* — in the dataset.
+
+    Args:
+        item:     A listing dict (the item being assessed). Must have 'price' and
+                  'category'.
+        listings: The pool to compare against. Defaults to load_listings() so the
+                  tool can be called standalone; pass a list to avoid re-loading.
+
+    Returns:
+        A dict describing the assessment:
+        {
+            "verdict":       str,    # "great deal" | "fair price" | "overpriced"
+                                     #   | "no comparison"
+            "price":         float,  # the item's price
+            "median":        float,  # median price of the comparables (None if none)
+            "low":           float,  # cheapest comparable
+            "high":          float,  # priciest comparable
+            "n_comparables": int,    # how many listings the verdict is based on
+            "reasoning":     str,    # human-readable explanation
+        }
+        Never raises — returns a "no comparison" verdict if there's nothing to
+        compare against.
+    """
+    if listings is None:
+        listings = load_listings()
+
+    category = item.get("category")
+    price = item.get("price")
+
+    comparables = [
+        l for l in listings
+        if l.get("category") == category
+        and l.get("id") != item.get("id")
+        and isinstance(l.get("price"), (int, float))
+    ]
+
+    if not comparables or not isinstance(price, (int, float)):
+        return {
+            "verdict": "no comparison",
+            "price": price,
+            "median": None,
+            "low": None,
+            "high": None,
+            "n_comparables": len(comparables),
+            "reasoning": (
+                f"Not enough comparable {category or 'similar'} listings to judge "
+                "this price."
+            ),
+        }
+
+    prices = [l["price"] for l in comparables]
+    median = statistics.median(prices)
+    low, high = min(prices), max(prices)
+
+    # Verdict thresholds, relative to the median of same-category comparables.
+    if price <= median * 0.85:
+        verdict = "great deal"
+    elif price <= median * 1.15:
+        verdict = "fair price"
+    else:
+        verdict = "overpriced"
+
+    pct = (price - median) / median * 100
+    direction = "below" if pct < 0 else "above"
+    reasoning = (
+        f"At ${price:.0f}, this {category} piece is {abs(pct):.0f}% {direction} the "
+        f"median ${median:.0f} of {len(comparables)} comparable {category} listings "
+        f"(which range ${low:.0f}–${high:.0f}). Verdict: {verdict}."
+    )
+
+    return {
+        "verdict": verdict,
+        "price": price,
+        "median": median,
+        "low": low,
+        "high": high,
+        "n_comparables": len(comparables),
+        "reasoning": reasoning,
+    }

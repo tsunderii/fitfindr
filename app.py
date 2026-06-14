@@ -63,13 +63,26 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     # 5. Format the selected listing for the first panel.
     item = session["selected_item"]
-    listing_text = (
+    parts = []
+
+    # Stretch: if the search had to loosen constraints, say so up top.
+    if session.get("search_note"):
+        parts.append(f"🔁 {session['search_note']}\n")
+
+    parts.append(
         f"{item['title']}\n"
         f"${item['price']:.2f}  ·  {item['platform']}  ·  {item['condition']} condition\n"
         f"Size: {item['size']}\n"
         f"Brand: {item.get('brand') or '—'}\n\n"
         f"{item['description']}"
     )
+
+    # Stretch: price assessment vs. comparable listings.
+    pa = session.get("price_assessment")
+    if pa and pa.get("verdict") != "no comparison":
+        parts.append(f"\n💰 Price check — {pa['verdict'].upper()}: {pa['reasoning']}")
+
+    listing_text = "\n".join(parts)
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 

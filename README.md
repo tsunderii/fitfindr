@@ -201,6 +201,27 @@ doc.
 
 ---
 
+## Stretch features
+
+**Price Comparison — `compare_price(item, listings=None)` in [tools.py](tools.py).**
+After the agent selects a listing, it assesses whether the price is fair. The tool gathers
+every *other* listing in the **same category** from the dataset, computes the median (plus
+min/max) of their prices, and classifies the selected item against that median: **great
+deal** (≥15% below), **fair price** (within ±15%), or **overpriced** (>15% above). It returns
+a verdict + reasoning, e.g. *"At $12, this accessories piece is 54% below the median $26 of 2
+comparable accessories listings (range $14–$38). Verdict: great deal."* The UI shows this
+under the listing. Comparisons are same-category on purpose — a $40 jacket and a $40 belt
+aren't meaningful peers, so each item is judged only against its own kind.
+
+**Retry with fallback — `_search_with_fallback()` in [agent.py](agent.py).**
+If the parsed search returns zero results, the loop doesn't stop immediately. It retries with
+progressively looser constraints — first dropping the **size** filter, then the **price** cap,
+then **both** — and uses the first attempt that returns matches. When a loosened attempt
+succeeds, the UI prepends what was relaxed: *"🔁 No exact match, so I loosened the $10 price
+cap to find these."* Only if even the fully-relaxed search finds nothing does it fall back to
+the graceful error, which now also names the loosenings it already tried
+(*"…I also tried without the size filter and with a higher budget, with no luck."*).
+
 ## Project layout
 
 ```
