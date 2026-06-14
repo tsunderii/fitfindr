@@ -13,8 +13,9 @@ the previous one returned.
 
 ## Demo
 
-📹 **[demo.mp4](./demo.mp4)** — happy-path query, the no-results branch, and the empty-wardrobe
-case. *(Replace this line with my recording / link.)*
+📹 **[Watch the demo on YouTube](https://youtu.be/tDR0nskqwAw)** — a complete multi-step
+interaction (search → outfit → fit card) plus the no-results branch and how the agent
+handles it gracefully.
 
 ---
 
